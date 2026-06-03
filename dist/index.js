@@ -58239,6 +58239,8 @@ const package_namespaceObject = JSON.parse('{"u2":"setup-ffmpeg","i8":"3.0.0"}')
 
 
 
+
+
 const USER_AGENT = `${package_namespaceObject.u2}/${package_namespaceObject.i8}`;
 const _7ZR_PATH = __nccwpck_require__.ab + "7zr.exe";
 
@@ -58281,6 +58283,40 @@ function normalizeVersion(version, isGitRelease) {
 function cleanVersion(version) {
   const clean = semver.clean(version);
   return (clean && clean.replace(/\.0+$/, '')) || version;
+}
+
+/**
+ * {@link fetch} wrapper that retries transient failures with exponential
+ * backoff. The download mirrors (johnvansickle.com, evermeet.cx, gyan.dev) are
+ * single-host static servers that intermittently time out, reset connections,
+ * or return 5xx/429 — a single transient failure must not fail the whole job.
+ *
+ * Network errors and retryable status codes (>= 500 and 429) are retried;
+ * every other response is returned unchanged, including 4xx responses that
+ * callers interpret as "not found" and redirects fetched with
+ * `redirect: 'manual'`.
+ *
+ * @param {string | URL} url
+ * @param {import('undici').RequestInit} [init]
+ * @param {{retries?: number, baseDelayMs?: number}} [options]
+ * @returns {Promise<import('undici').Response>}
+ */
+async function fetchWithRetry(url, init, {retries = 4, baseDelayMs = 500} = {}) {
+  let lastError;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const res = await (0,undici/* fetch */.he)(url, init);
+      if (res.status < 500 && res.status !== 429) return res;
+      lastError = new Error(`${url} responded with status ${res.status}`);
+    } catch (err) {
+      lastError = err;
+    }
+    if (attempt >= retries) break;
+    const delay = baseDelayMs * 2 ** attempt + Math.floor(Math.random() * baseDelayMs);
+    core.info(`Request to ${url} failed (${lastError.message}); retrying in ${delay}ms`);
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+  throw lastError;
 }
 
 ;// CONCATENATED MODULE: ./src/dists/gyan.js
@@ -58388,7 +58424,6 @@ class GyanInstaller {
 
 
 
-
 class JohnVanSickleInstaller {
   /**
    * @param {import('./installer').InstallerOptions} options
@@ -58409,7 +58444,7 @@ class JohnVanSickleInstaller {
     const url = isGitBuild
       ? 'https://johnvansickle.com/ffmpeg/git-readme.txt'
       : 'https://johnvansickle.com/ffmpeg/release-readme.txt';
-    const res = await (0,undici/* fetch */.he)(url, {
+    const res = await fetchWithRetry(url, {
       headers: {
         'user-agent': USER_AGENT,
       },
@@ -58442,13 +58477,13 @@ class JohnVanSickleInstaller {
       },
       redirect: 'manual',
     };
-    let res = await (0,undici/* fetch */.he)(
+    let res = await fetchWithRetry(
       `https://johnvansickle.com/ffmpeg/releases/ffmpeg-${version}-${this.getArch()}-static.tar.xz`,
       init,
     );
     // Check in old releases if not available
     if (!res.ok) {
-      res = await (0,undici/* fetch */.he)(
+      res = await fetchWithRetry(
         `https://johnvansickle.com/ffmpeg/old-releases/ffmpeg-${version}-${this.getArch()}-static.tar.xz`,
         init,
       );
@@ -58469,12 +58504,17 @@ class JohnVanSickleInstaller {
    * @returns {Promise<import('./installer').ReleaseInfo[]>}
    */
   async getAvailableReleases() {
-    const releases = [await this.getLatestRelease()];
-    if (this.version.toLowerCase() !== 'git' && this.version.toLowerCase() !== 'release') {
+    const version = this.version.toLowerCase();
+    // A concrete pinned version is resolved exactly by getRelease() with a single
+    // HEAD request, so skip the latest-release readme fetch in that case. That
+    // readme fetch is the flakiest dependency in this action — johnvansickle.com
+    // intermittently times out or rate-limits — and a pinned version has no need
+    // to know what the latest release is.
+    if (version !== 'git' && version !== 'release') {
       const release = await this.getRelease();
-      if (release && releases[0].version !== release.version) releases.push(release);
+      if (release) return [release];
     }
-    return releases;
+    return [await this.getLatestRelease()];
   }
   // /**
   //  * @param {ReleaseInfo} release
