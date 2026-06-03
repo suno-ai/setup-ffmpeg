@@ -2,9 +2,8 @@ import * as assert from 'assert';
 
 import * as tc from '@actions/tool-cache';
 import * as core from '@actions/core';
-import {fetch} from 'undici';
 
-import {USER_AGENT, cleanVersion, normalizeVersion} from '../util';
+import {USER_AGENT, cleanVersion, normalizeVersion, fetchWithRetry} from '../util';
 import {readdir} from 'fs/promises';
 import * as path from 'path';
 
@@ -28,7 +27,7 @@ export class JohnVanSickleInstaller {
     const url = isGitBuild
       ? 'https://johnvansickle.com/ffmpeg/git-readme.txt'
       : 'https://johnvansickle.com/ffmpeg/release-readme.txt';
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
       headers: {
         'user-agent': USER_AGENT,
       },
@@ -61,13 +60,13 @@ export class JohnVanSickleInstaller {
       },
       redirect: 'manual',
     };
-    let res = await fetch(
+    let res = await fetchWithRetry(
       `https://johnvansickle.com/ffmpeg/releases/ffmpeg-${version}-${this.getArch()}-static.tar.xz`,
       init,
     );
     // Check in old releases if not available
     if (!res.ok) {
-      res = await fetch(
+      res = await fetchWithRetry(
         `https://johnvansickle.com/ffmpeg/old-releases/ffmpeg-${version}-${this.getArch()}-static.tar.xz`,
         init,
       );
@@ -88,12 +87,17 @@ export class JohnVanSickleInstaller {
    * @returns {Promise<import('./installer').ReleaseInfo[]>}
    */
   async getAvailableReleases() {
-    const releases = [await this.getLatestRelease()];
-    if (this.version.toLowerCase() !== 'git' && this.version.toLowerCase() !== 'release') {
+    const version = this.version.toLowerCase();
+    // A concrete pinned version is resolved exactly by getRelease() with a single
+    // HEAD request, so skip the latest-release readme fetch in that case. That
+    // readme fetch is the flakiest dependency in this action — johnvansickle.com
+    // intermittently times out or rate-limits — and a pinned version has no need
+    // to know what the latest release is.
+    if (version !== 'git' && version !== 'release') {
       const release = await this.getRelease();
-      if (release && releases[0].version !== release.version) releases.push(release);
+      if (release) return [release];
     }
-    return releases;
+    return [await this.getLatestRelease()];
   }
   // /**
   //  * @param {ReleaseInfo} release
