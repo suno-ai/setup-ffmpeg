@@ -17,7 +17,9 @@ WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 VERSION="${1:-}"
+PINNED=1
 if [[ -z "$VERSION" ]]; then
+  PINNED=0
   echo "Resolving current upstream release version..."
   VERSION="$(curl -fsSL https://johnvansickle.com/ffmpeg/release-readme.txt \
     | sed -n 's/^ *version: *//p' | head -1)"
@@ -38,17 +40,40 @@ fi
 
 ASSETS=()
 for ARCH in $ARCHES; do
-  # johnvansickle only labels the *latest* release as "release-<arch>"; a pinned
-  # historical version lives under a versioned filename. Try both.
+  # johnvansickle only labels the *latest* release as "release-<arch>". A pinned
+  # version has a versioned filename under releases/ while it is current and
+  # under old-releases/ after that. Never fall back to "release-<arch>" for a
+  # pinned version: that is whatever is current, not the requested build.
   OUT="${WORKDIR}/ffmpeg-${VERSION}-${ARCH}-static.tar.xz"
-  echo "Downloading ${ARCH} build..."
-  if ! curl -fL -o "$OUT" \
-      "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-${ARCH}-static.tar.xz"; then
-    curl -fL -o "$OUT" \
-      "https://johnvansickle.com/ffmpeg/releases/ffmpeg-${VERSION}-${ARCH}-static.tar.xz"
+  NAME="ffmpeg-${VERSION}-${ARCH}-static.tar.xz"
+  if [[ "$PINNED" == 1 ]]; then
+    URLS=(
+      "https://johnvansickle.com/ffmpeg/releases/${NAME}"
+      "https://johnvansickle.com/ffmpeg/old-releases/${NAME}"
+    )
+  else
+    URLS=("https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-${ARCH}-static.tar.xz")
   fi
-  # Sanity check: the binary inside should report the expected version.
-  tar -tf "$OUT" >/dev/null
+  echo "Downloading ${ARCH} build..."
+  DOWNLOADED=0
+  for URL in "${URLS[@]}"; do
+    if curl -fL -o "$OUT" "$URL"; then
+      DOWNLOADED=1
+      break
+    fi
+  done
+  if [[ "$DOWNLOADED" != 1 ]]; then
+    echo "ERROR: no ${ARCH} build of ffmpeg ${VERSION} found on johnvansickle.com" >&2
+    exit 1
+  fi
+  # Sanity check: johnvansickle tarballs unpack into ffmpeg-<version>-<arch>-static/,
+  # so the top-level directory must match the version we are about to tag.
+  # (awk reads the whole listing, so tar never gets SIGPIPE under pipefail.)
+  TOP="$(tar -tf "$OUT" | awk 'NR == 1')"
+  if [[ "${TOP%%/*}" != "ffmpeg-${VERSION}-${ARCH}-static" ]]; then
+    echo "ERROR: ${ARCH} archive contains ${TOP%%/*}, expected ffmpeg-${VERSION}-${ARCH}-static" >&2
+    exit 1
+  fi
   ASSETS+=("$OUT")
 done
 
